@@ -1,0 +1,10 @@
+{
+  "tone": "casual_sharp",
+  "maxLength": 250,
+  "preferredTopics": ["votes", "attendance", "committees", "bills"],
+  "includeHashtags": true,
+  "cronActive": true,
+  "intervalHours": 2,
+  "language": "he",
+  "styleNotes": "דבר כמו חבר חכם שמספר לחבר מה קרה — לא עיתונאי. עוקצני, בגובה העיניים, קצר."
+}

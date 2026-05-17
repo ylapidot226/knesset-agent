@@ -1,0 +1,21 @@
+{
+  "name": "knesset-agent",
+  "version": "1.0.0",
+  "description": "Telegram bot that manages a Twitter account about Knesset members activity",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "openai": "^4.52.0",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0",
+    "node-cron": "^3.0.3",
+    "node-telegram-bot-api": "^0.66.0",
+    "twitter-api-v2": "^1.17.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
