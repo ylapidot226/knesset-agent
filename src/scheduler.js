@@ -4,7 +4,7 @@ const knesset = require('./knesset');
 const ai = require('./ai');
 const { sendTweetPairForApproval, sendTweetForApproval, notify } = require('./bot');
 
-const CRON_EXPR = '0 9-21 * * *';
+const CRON_EXPR = '0 8-22 * * *';
 const TZ = 'Asia/Jerusalem';
 
 let cronTask = null;

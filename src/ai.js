@@ -137,12 +137,6 @@ function validateTweetFacts(tweet, sourceData) {
     }
   }
 
-  // Reject Twitter handles (@ mentions) — API has no Twitter data
-  if (/@\S+/.test(tweet)) {
-    console.error('[ai] validation FAILED — tweet contains @ mention (not in API data)');
-    return false;
-  }
-
   // Check MK names after ח"כ pattern exist in source
   const mkPattern = /ח["'״]כ\s+([א-ת]+(?:\s+[א-ת]+)?)/g;
   let m;
@@ -267,9 +261,11 @@ function endpointForType(sourceType) {
 // ── Tweet pair generation ──────────────────────────────────────────────────
 
 const EXPLAIN_SYSTEM = `אתה עוזר שמסביר חקיקה ופעילות פרלמנטרית בעברית פשוטה לאנשים רגילים.
-הסבר בקצרה מה משמעות הפעולה הפרלמנטרית הזו בחיים האמיתיים.
-אל תמציא עובדות ספציפיות. הסבר את הנושא הכללי בלבד.
-1-3 משפטים קצרים. ללא האשטגים.`;
+התחל תמיד בשורה: על מה מדובר?
+הסבר מה משמעות הפעולה הפרלמנטרית הזו בחיי האזרח הרגיל.
+הסתמך אך ורק על השם/הכותרת שמופיעים בנתוני OData — אל תמציא עובדות.
+אם אין מספיק מידע — כתוב את השם המלא ולאחריו: לפרטים נוספים: knesset.gov.il
+ללא האשטגים. ללא @mentions. עד 500 תווים.`;
 
 async function generateTweetPair(item, dayType, config, validIds) {
   const maxLen = config.maxLength || 200;
@@ -279,9 +275,12 @@ async function generateTweetPair(item, dayType, config, validIds) {
   const tweet1Prompt = `פריט נתונים מ-OData הכנסת (${dayType}):
 ${itemJson}
 
-כתוב ציוץ קצר (עד ${maxLen} תווים) על פריט זה.
-חייב לכלול: שם ח"כ רלוונטי (אם קיים בנתונים), עובדה מספרית אחת, ו-#כנסת + האשטג רלוונטי.
+כתוב ציוץ קצר (עד 250 תווים) על פריט זה.
+חייב לכלול: שם ח"כ רלוונטי (אם קיים בנתונים), עובדה מספרית אחת.
 אסור לציין מידע שאינו בנתונים.
+אסור לנחש ידיות טוויטר של ח"כים — ה-API אינו מכיל אותן.
+שורה לפני ההאשטגים: 🧵 הסבר בציוץ הבא
+שורת האשטגים חייבת להתחיל ב-@ערוץ_הכנסת ולאחר מכן #כנסת + האשטג רלוונטי.
 
 החזר JSON בלבד:
 {
@@ -306,7 +305,8 @@ ${itemJson}
     return null;
   }
 
-  const { sourceId, sourceType, date, tweet1 } = parsed1;
+  const { sourceId, sourceType, date } = parsed1;
+  const tweet1 = parsed1.tweet1 ?? parsed1.tweet;
   if (!tweet1 || !sourceId) {
     console.error('[ai] generateTweetPair: missing tweet1 or sourceId');
     return null;
@@ -317,16 +317,20 @@ ${itemJson}
     return null;
   }
 
+  const docUrlLine = item.docUrl ? `\nבסוף הציוץ הוסף: 📄 מסמך מלא: ${item.docUrl}` : '';
+
   const tweet2Prompt = `פריט פרלמנטרי:
 ${itemJson}
 
 הציוץ שנכתב עליו:
 "${tweet1}"
 
-הסבר בעברית פשוטה מה המשמעות המעשית של פעולה פרלמנטרית זו בחיים האמיתיים.
-עד 500 תווים. ללא האשטגים. ללא @mentions.`;
+הסבר בעברית פשוטה מה המשמעות המעשית של פעולה פרלמנטרית זו בחיי האזרח הרגיל.
+הסתמך אך ורק על השם/הכותרת שמופיעים בנתונים — אל תמציא עובדות.
+אם אין מספיק מידע — כתוב את השם המלא ולאחריו: לפרטים נוספים: knesset.gov.il
+עד 500 תווים. ללא האשטגים. ללא @mentions.${docUrlLine}`;
 
-  const tweet2 = await chat(EXPLAIN_SYSTEM, tweet2Prompt, 300);
+  const tweet2 = await chat(EXPLAIN_SYSTEM, tweet2Prompt, 400);
   if (!tweet2 || tweet2.trim() === 'null') return null;
 
   return { tweet1, tweet2, sourceId, sourceType, date };

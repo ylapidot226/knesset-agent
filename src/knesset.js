@@ -149,27 +149,11 @@ async function getAbsences(voteId) {
 async function getRecentSessions() {
   const { data: sessions, endpoint, error } = await odata(
     'KNS_PlenumSession',
-    `$filter=KnessetNum eq ${KNESSET_NUM}&$orderby=Id desc&$top=5`
+    `$filter=KnessetNum eq ${KNESSET_NUM}&$orderby=Id desc&$top=5&$expand=KNS_PlmSessionItem($filter=IsDiscussion eq 1)`
   );
 
   if (error) return noData(`שגיאה בשליפת ישיבות מליאה: ${error}`, endpoint);
   if (!sessions.length) return noData('אין ישיבות מליאה', endpoint);
-
-  // Fetch agenda items (IsDiscussion eq 1) for each session
-  const sessionIds = sessions.map((s) => s.Id);
-  const agendaFilter = encodeURIComponent(
-    `(${sessionIds.map((id) => `PlenumSessionID eq ${id}`).join(' or ')}) and IsDiscussion eq 1`
-  );
-  const { data: agendaRows } = await odata(
-    'KNS_PlmSessionItem',
-    `$filter=${agendaFilter}&$orderby=Ordinal&$select=PlenumSessionID,Name,ItemTypeDesc,Ordinal`
-  );
-
-  const agendaBySession = {};
-  for (const row of agendaRows) {
-    agendaBySession[row.PlenumSessionID] = agendaBySession[row.PlenumSessionID] ?? [];
-    agendaBySession[row.PlenumSessionID].push(`${row.ItemTypeDesc}: ${row.Name}`);
-  }
 
   return {
     hasData: true,
@@ -179,7 +163,7 @@ async function getRecentSessions() {
       number: s.Number,
       date:   s.StartDate?.slice(0, 10),
       name:   s.Name,
-      agenda: agendaBySession[s.Id] ?? [],
+      agenda: (s.KNS_PlmSessionItem ?? []).map((row) => `${row.ItemTypeDesc}: ${row.Name}`),
     })),
   };
 }
@@ -208,7 +192,7 @@ async function getCommitteeSessions(days = 7) {
   );
   const { data: sessions, endpoint: sessEp, error: sessErr } = await odata(
     'KNS_CommitteeSession',
-    `$filter=${filter}&$orderby=Number&$select=Id,CommitteeID,StartDate,Number,StatusDesc`
+    `$filter=${filter}&$orderby=Number&$select=Id,CommitteeID,StartDate,Number,StatusDesc&$expand=KNS_CmtSessionItem`
   );
 
   if (sessErr) return noData(`שגיאה בשליפת ישיבות ועדות: ${sessErr}`, sessEp);
@@ -221,7 +205,8 @@ async function getCommitteeSessions(days = 7) {
       id:        s.Id,
       committee: nameById[s.CommitteeID] ?? `ועדה ${s.CommitteeID}`,
       date:      s.StartDate?.slice(0, 10),
-      number:    s.Number ?? null,   // null for future/unassigned sessions
+      number:    s.Number ?? null,
+      items:     s.KNS_CmtSessionItem ?? [],
     })),
   };
 }
@@ -255,7 +240,7 @@ async function getCurrentMembers() {
 async function getMemberQueries(personId) {
   const { data, endpoint, error } = await odata(
     'KNS_Query',
-    `$filter=${encodeURIComponent(`PersonID eq ${personId} and KnessetNum eq ${KNESSET_NUM}`)}&$orderby=Id desc&$top=20&$select=Id,Name,TypeDesc,SubmitDate,ReplyMinisterDate`
+    `$filter=${encodeURIComponent(`PersonID eq ${personId} and KnessetNum eq ${KNESSET_NUM}`)}&$orderby=Id desc&$top=20&$select=Id,Name,TypeDesc,SubmitDate,ReplyMinisterDate&$expand=KNS_DocumentQuery`
   );
 
   if (error) return noData(`שגיאה בשליפת שאילתות PersonID=${personId}: ${error}`, endpoint);
@@ -271,6 +256,7 @@ async function getMemberQueries(personId) {
       type:        r.TypeDesc,
       submitDate:  r.SubmitDate?.slice(0, 10),
       replyDate:   r.ReplyMinisterDate?.slice(0, 10) ?? null,
+      docUrl:      r.KNS_DocumentQuery?.find((d) => d.ApplicationDesc === 'PDF')?.FilePath ?? null,
     })),
   };
 }
@@ -722,22 +708,26 @@ async function fetchQueriesThisWeek() {
   const since = isoAgo(7);
   const { data: queries, endpoint } = await odata(
     'KNS_Query',
-    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and SubmitDate gt ${since}`)}&$orderby=Id desc&$top=50&$select=Id,Name,TypeDesc,SubmitDate,PersonID`
+    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and SubmitDate gt ${since}`)}&$orderby=Id desc&$top=20&$select=Id,Name,TypeDesc,SubmitDate,PersonID&$expand=KNS_DocumentQuery`
   );
   if (!queries.length) return [];
 
   const personIds = [...new Set(queries.map((q) => q.PersonID).filter(Boolean))];
   const nameMap = personIds.length ? await fetchPersonNames(personIds) : {};
 
-  return queries.map((q) => ({
-    id: q.Id,
-    name: q.Name,
-    type: q.TypeDesc,
-    date: q.SubmitDate?.slice(0, 10) ?? null,
-    personId: q.PersonID ?? null,
-    mkName: q.PersonID ? (nameMap[q.PersonID] ?? null) : null,
-    endpoint,
-  }));
+  return queries.map((q) => {
+    const docUrl = q.KNS_DocumentQuery?.find((d) => d.ApplicationDesc === 'PDF')?.FilePath ?? null;
+    return {
+      id: q.Id,
+      name: q.Name,
+      type: q.TypeDesc,
+      date: q.SubmitDate?.slice(0, 10) ?? null,
+      personId: q.PersonID ?? null,
+      mkName: q.PersonID ? (nameMap[q.PersonID] ?? null) : null,
+      docUrl,
+      endpoint,
+    };
+  });
 }
 
 async function fetchWeeklyMKActivity() {
