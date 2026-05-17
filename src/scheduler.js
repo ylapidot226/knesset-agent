@@ -66,7 +66,7 @@ async function runCycle() {
   let processed = 0;
 
   for (const item of fetchedItems) {
-    if (processed >= 5) break;
+    if (processed >= 50) break;
     if (stateManager.hasItemBeenSent(item.id)) continue;
 
     let pair;
