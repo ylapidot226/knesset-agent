@@ -287,14 +287,12 @@ async function getMemberBills(personId) {
   if (initErr) return noData(`שגיאה בשליפת BillInitiator PersonID=${personId}: ${initErr}`, initEp);
   if (!initRows.length) return noData(`אין הצעות חוק לח"כ ${personId}`, initEp);
 
-  // Step 2: get bill details (up to 5 at a time to avoid URL length limit)
+  // Step 2: get bill details with initiator expand (up to 5 at a time)
   const billIds = initRows.slice(0, 5).map((r) => r.BillID);
-  const billFilter = encodeURIComponent(
-    billIds.map((id) => `Id eq ${id}`).join(' or ')
-  );
+  const billFilter = encodeURIComponent(billIds.map((id) => `Id eq ${id}`).join(' or '));
   const { data: bills, endpoint: billEp } = await odata(
     'KNS_Bill',
-    `$filter=${billFilter}&$select=Id,Name,SubTypeDesc,StatusID,LastUpdatedDate`
+    `$filter=${billFilter}&$expand=KNS_BillInitiator($expand=KNS_Person)&$select=Id,Name,SubTypeDesc,StatusID,LastUpdatedDate`
   );
 
   return {
@@ -404,17 +402,20 @@ async function fetchRecentActivity() {
     }
   }
 
-  // Recent bills
+  // Recent bills (with initiator via expand)
   const { data: billRows, endpoint: billEp } = await odata(
     'KNS_Bill',
-    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM}`)}&$orderby=Id desc&$top=20&$select=Id,Name,SubTypeDesc,LastUpdatedDate`
+    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM}`)}&$orderby=Id desc&$top=20&$expand=KNS_BillInitiator($expand=KNS_Person)&$select=Id,Name,SubTypeDesc,LastUpdatedDate`
   );
   usedEndpoints.add(billEp);
   if (billRows.length) {
     lines.push('');
     lines.push(`=== הצעות חוק אחרונות | ${billEp} ===`);
     for (const b of billRows.slice(0, 8)) {
-      lines.push(`• [ID:${b.Id}] ${b.LastUpdatedDate?.slice(0, 10)} — ${b.Name} (${b.SubTypeDesc})`);
+      const initiatorRow = b.KNS_BillInitiator?.find((r) => r.IsInitiator);
+      const p = initiatorRow?.KNS_Person;
+      const initiatorStr = p ? ` | מגיש: ${p.FirstName} ${p.LastName}`.trim() : '';
+      lines.push(`• [ID:${b.Id}] ${b.LastUpdatedDate?.slice(0, 10)} — ${b.Name} (${b.SubTypeDesc})${initiatorStr}`);
     }
   }
 
@@ -611,37 +612,18 @@ async function fetchNewBillsThisWeek() {
   const since = isoAgo(7);
   const { data: bills, endpoint } = await odata(
     'KNS_Bill',
-    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and LastUpdatedDate gt ${since}`)}&$orderby=Id desc&$top=30&$select=Id,Name,SubTypeDesc,LastUpdatedDate`
+    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and LastUpdatedDate gt ${since}`)}&$orderby=Id desc&$top=30&$expand=KNS_BillInitiator($expand=KNS_Person)&$select=Id,Name,SubTypeDesc,LastUpdatedDate`
   );
   if (!bills.length) return [];
 
-  const billIds = bills.map((b) => b.Id);
-  const batches = [];
-  for (let i = 0; i < billIds.length; i += 5) batches.push(billIds.slice(i, i + 5));
-
-  const initiatorByBill = {};
-  for (const batch of batches) {
-    const filter = encodeURIComponent(batch.map((id) => `BillID eq ${id}`).join(' or ') + ' and IsInitiator eq true');
-    const { data: initRows } = await odata('KNS_BillInitiator', `$filter=${filter}&$select=BillID,PersonID`);
-    for (const r of initRows) {
-      if (!initiatorByBill[r.BillID]) initiatorByBill[r.BillID] = r.PersonID;
-    }
-  }
-
-  const personIds = [...new Set(Object.values(initiatorByBill).filter(Boolean))];
-  const nameMap = personIds.length ? await fetchPersonNames(personIds) : {};
-
-  return bills.map((b) => {
-    const personId = initiatorByBill[b.Id] ?? null;
-    return {
-      id: b.Id,
-      name: b.Name,
-      type: b.SubTypeDesc,
-      date: b.LastUpdatedDate?.slice(0, 10) ?? null,
-      initiator: personId ? (nameMap[personId] ?? null) : null,
-      endpoint,
-    };
-  });
+  return bills
+    .map((b) => {
+      const initiatorRow = b.KNS_BillInitiator?.find((r) => r.IsInitiator);
+      const p = initiatorRow?.KNS_Person;
+      const initiator = p ? `${p.FirstName} ${p.LastName}`.trim() : null;
+      return { id: b.Id, name: b.Name, type: b.SubTypeDesc, date: b.LastUpdatedDate?.slice(0, 10) ?? null, initiator, endpoint };
+    })
+    .filter((b) => b.initiator !== null);
 }
 
 async function fetchTodaysPlenaryAgenda() {
