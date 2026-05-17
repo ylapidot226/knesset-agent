@@ -603,6 +603,205 @@ async function fetchPersonNames(personIds) {
   return results;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Day-specific fetch functions (weekly content plan)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function fetchNewBillsThisWeek() {
+  const since = isoAgo(7);
+  const { data: bills, endpoint } = await odata(
+    'KNS_Bill',
+    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and LastUpdatedDate gt ${since}`)}&$orderby=Id desc&$top=30&$select=Id,Name,SubTypeDesc,LastUpdatedDate`
+  );
+  if (!bills.length) return [];
+
+  const billIds = bills.map((b) => b.Id);
+  const batches = [];
+  for (let i = 0; i < billIds.length; i += 5) batches.push(billIds.slice(i, i + 5));
+
+  const initiatorByBill = {};
+  for (const batch of batches) {
+    const filter = encodeURIComponent(batch.map((id) => `BillID eq ${id}`).join(' or ') + ' and IsInitiator eq true');
+    const { data: initRows } = await odata('KNS_BillInitiator', `$filter=${filter}&$select=BillID,PersonID`);
+    for (const r of initRows) {
+      if (!initiatorByBill[r.BillID]) initiatorByBill[r.BillID] = r.PersonID;
+    }
+  }
+
+  const personIds = [...new Set(Object.values(initiatorByBill).filter(Boolean))];
+  const nameMap = personIds.length ? await fetchPersonNames(personIds) : {};
+
+  return bills.map((b) => {
+    const personId = initiatorByBill[b.Id] ?? null;
+    return {
+      id: b.Id,
+      name: b.Name,
+      type: b.SubTypeDesc,
+      date: b.LastUpdatedDate?.slice(0, 10) ?? null,
+      initiator: personId ? (nameMap[personId] ?? null) : null,
+      endpoint,
+    };
+  });
+}
+
+async function fetchTodaysPlenaryAgenda() {
+  const now = new Date();
+  const todayStart = new Date(now);
+  todayStart.setHours(0, 0, 0, 0);
+  const todayEnd = new Date(now);
+  todayEnd.setHours(23, 59, 59, 999);
+
+  const startIso = todayStart.toISOString().replace('.000Z', 'Z');
+  const endIso = todayEnd.toISOString().replace('.999Z', 'Z');
+
+  const { data: sessions, endpoint } = await odata(
+    'KNS_PlenumSession',
+    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and StartDate gt ${startIso} and StartDate lt ${endIso}`)}&$select=Id,Number,Name,StartDate`
+  );
+  if (!sessions.length) return [];
+
+  const sessionIds = sessions.map((s) => s.Id);
+  const idFilter = encodeURIComponent(
+    `(${sessionIds.map((id) => `PlenumSessionID eq ${id}`).join(' or ')}) and IsDiscussion eq 1`
+  );
+  const { data: items, endpoint: itemEp } = await odata(
+    'KNS_PlmSessionItem',
+    `$filter=${idFilter}&$orderby=Ordinal&$select=Id,PlenumSessionID,Name,ItemTypeDesc,Ordinal`
+  );
+
+  return items.map((item) => ({
+    id: item.Id,
+    sessionId: item.PlenumSessionID,
+    name: item.Name,
+    type: item.ItemTypeDesc,
+    ordinal: item.Ordinal,
+    endpoint: itemEp,
+  }));
+}
+
+async function fetchRecentVotesWithResults() {
+  const votesResult = await getRecentVotes();
+  if (!votesResult.hasData) return [];
+
+  const enriched = [];
+  for (const v of votesResult.votes) {
+    const results = await getVoteResults(v.id);
+    enriched.push({
+      id: v.id,
+      date: v.date,
+      title: v.title,
+      subject: v.subject,
+      counts: results.hasData ? results.counts : null,
+      absent: results.hasData ? MK_TOTAL - results.total : null,
+      endpoint: votesResult.endpoint,
+    });
+  }
+  return enriched;
+}
+
+async function fetchTodaysCommitteeSessions() {
+  const { data: committees, endpoint: cmtEp } = await odata(
+    'KNS_Committee',
+    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and CommitteeTypeID eq 71 and IsCurrent eq true`)}&$select=Id,Name`
+  );
+  if (!committees.length) return [];
+
+  const nameById = Object.fromEntries(committees.map((c) => [c.Id, c.Name]));
+  const committeeIds = committees.map((c) => c.Id);
+
+  const now = new Date();
+  const todayStart = new Date(now);
+  todayStart.setHours(0, 0, 0, 0);
+  const todayEnd = new Date(now);
+  todayEnd.setHours(23, 59, 59, 999);
+
+  const startIso = todayStart.toISOString().replace('.000Z', 'Z');
+  const endIso = todayEnd.toISOString().replace('.999Z', 'Z');
+
+  const idFilter = committeeIds.map((id) => `CommitteeID eq ${id}`).join(' or ');
+  const filter = encodeURIComponent(
+    `(${idFilter}) and StartDate gt ${startIso} and StartDate lt ${endIso} and StatusID ne 193`
+  );
+  const { data: sessions, endpoint } = await odata(
+    'KNS_CommitteeSession',
+    `$filter=${filter}&$orderby=Number&$select=Id,CommitteeID,StartDate,Number`
+  );
+
+  return sessions.map((s) => ({
+    id: s.Id,
+    committee: nameById[s.CommitteeID] ?? `ועדה ${s.CommitteeID}`,
+    date: s.StartDate?.slice(0, 10) ?? null,
+    number: s.Number ?? null,
+    endpoint,
+  }));
+}
+
+async function fetchQueriesThisWeek() {
+  const since = isoAgo(7);
+  const { data: queries, endpoint } = await odata(
+    'KNS_Query',
+    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and SubmitDate gt ${since}`)}&$orderby=Id desc&$top=50&$select=Id,Name,TypeDesc,SubmitDate,PersonID`
+  );
+  if (!queries.length) return [];
+
+  const personIds = [...new Set(queries.map((q) => q.PersonID).filter(Boolean))];
+  const nameMap = personIds.length ? await fetchPersonNames(personIds) : {};
+
+  return queries.map((q) => ({
+    id: q.Id,
+    name: q.Name,
+    type: q.TypeDesc,
+    date: q.SubmitDate?.slice(0, 10) ?? null,
+    personId: q.PersonID ?? null,
+    mkName: q.PersonID ? (nameMap[q.PersonID] ?? null) : null,
+    endpoint,
+  }));
+}
+
+async function fetchWeeklyMKActivity() {
+  const since = isoAgo(7);
+
+  const { data: queries, endpoint: qEp } = await odata(
+    'KNS_Query',
+    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and SubmitDate gt ${since}`)}&$orderby=Id desc&$top=200&$select=Id,PersonID`
+  );
+
+  const { data: initRows, endpoint: bEp } = await odata(
+    'KNS_BillInitiator',
+    `$filter=${encodeURIComponent(`IsInitiator eq true`)}&$select=PersonID,BillID&$top=200`
+  );
+
+  const queryCountByPerson = {};
+  for (const q of queries) {
+    if (!q.PersonID) continue;
+    queryCountByPerson[q.PersonID] = (queryCountByPerson[q.PersonID] || 0) + 1;
+  }
+
+  const billCountByPerson = {};
+  for (const r of initRows) {
+    if (!r.PersonID) continue;
+    billCountByPerson[r.PersonID] = (billCountByPerson[r.PersonID] || 0) + 1;
+  }
+
+  const allPersonIds = [...new Set([
+    ...Object.keys(queryCountByPerson).map(Number),
+    ...Object.keys(billCountByPerson).map(Number),
+  ])];
+
+  const nameMap = allPersonIds.length ? await fetchPersonNames(allPersonIds) : {};
+
+  const merged = allPersonIds.map((personId) => ({
+    personId,
+    mkName: nameMap[personId] ?? `PersonID:${personId}`,
+    queryCount: queryCountByPerson[personId] || 0,
+    billCount: billCountByPerson[personId] || 0,
+    endpoint: qEp,
+  }));
+
+  merged.sort((a, b) => (b.queryCount + b.billCount) - (a.queryCount + a.billCount));
+  return merged.slice(0, 15);
+}
+
 // ── Legacy shims (used by bot.js / scheduler.js) ──────────────────────────
 
 async function findMemberByName(name) {
@@ -640,6 +839,13 @@ module.exports = {
   fetchRecentActivity,
   findMemberActivity,
   fetchFactionMembers,
+  // Day-specific (weekly content plan)
+  fetchNewBillsThisWeek,
+  fetchTodaysPlenaryAgenda,
+  fetchRecentVotesWithResults,
+  fetchTodaysCommitteeSessions,
+  fetchQueriesThisWeek,
+  fetchWeeklyMKActivity,
   // Legacy shims
   findMemberByName,
   getCommitteeMeetings,

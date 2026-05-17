@@ -42,20 +42,20 @@ async function refreshIfNeeded() {
 /**
  * Post a tweet. Returns { id, url } on success.
  */
-async function postTweet(text) {
+async function postTweet(text, replyToId = null) {
   const client = getUserClient();
+  const tweetOptions = replyToId ? { reply: { in_reply_to_tweet_id: replyToId } } : undefined;
   try {
-    const { data } = await client.v2.tweet(text);
+    const { data } = await client.v2.tweet(text, tweetOptions);
     const handle = process.env.TWITTER_HANDLE || 'Knesset_Ground';
     return {
       id: data.id,
       url: `https://twitter.com/${handle}/status/${data.id}`,
     };
   } catch (err) {
-    // If 401, try refreshing token and retry once
     if (err.code === 401) {
       await refreshIfNeeded();
-      const { data } = await getUserClient().v2.tweet(text);
+      const { data } = await getUserClient().v2.tweet(text, tweetOptions);
       const handle = process.env.TWITTER_HANDLE || 'Knesset_Ground';
       return { id: data.id, url: `https://twitter.com/${handle}/status/${data.id}` };
     }

@@ -40,19 +40,12 @@ async function sendTweetForApproval(tweetText, meta = {}) {
     return null;
   }
 
-  // First send without buttons
-  const msg = await bot.sendMessage(
-    chatId,
-    `📝 *ציוץ לאישור:*\n\n${escapeMarkdown(tweetText)}`,
-    { parse_mode: 'Markdown' }
-  );
+  const msg = await bot.sendMessage(chatId, `📝 ציוץ לאישור:\n\n${tweetText}`);
 
   const mid = msg.message_id;
 
-  // Store pending tweet
   stateManager.addPendingTweet(mid, { text: tweetText, meta });
 
-  // Add buttons referencing the real message id
   await bot.editMessageReplyMarkup(
     {
       inline_keyboard: [
@@ -65,6 +58,30 @@ async function sendTweetForApproval(tweetText, meta = {}) {
     },
     { chat_id: chatId, message_id: mid }
   );
+
+  return msg;
+}
+
+async function sendTweetPairForApproval(pair, meta = {}) {
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!chatId) {
+    console.error('[bot] TELEGRAM_CHAT_ID not set');
+    return null;
+  }
+
+  const msgText = `📝 ציוץ לאישור:\n\n${pair.tweet1}\n\n──────────────\n💬 תגובה (תישלח אחרי 30 שניות):\n\n${pair.tweet2}`;
+
+  const msg = await bot.sendMessage(chatId, msgText);
+  const mid = msg.message_id;
+  stateManager.addPendingTweet(mid, { text: pair.tweet1, tweet2: pair.tweet2, meta });
+
+  await bot.editMessageReplyMarkup({
+    inline_keyboard: [[
+      { text: '✅ פרסם', callback_data: `approve:${mid}` },
+      { text: '✏️ ערוך', callback_data: `edit:${mid}` },
+      { text: '❌ דחה', callback_data: `reject:${mid}` },
+    ]]
+  }, { chat_id: chatId, message_id: mid });
 
   return msg;
 }
@@ -97,14 +114,26 @@ async function handleApprove(chatId, messageId, origMessage) {
   }
 
   try {
-    const result = await twitter.postTweet(pending.text);
-    stateManager.recordPublished(pending.text, result.id);
+    const result1 = await twitter.postTweet(pending.text);
+    stateManager.recordPublished(pending.text, result1.id);
     stateManager.removePendingTweet(messageId);
 
     await bot.editMessageText(
-      `✅ *פורסם!*\n\n${escapeMarkdown(pending.text)}\n\n🔗 ${result.url}`,
-      { chat_id: chatId, message_id: origMessage.message_id, parse_mode: 'Markdown' }
+      `✅ פורסם!\n\n${pending.text}\n\n🔗 ${result1.url}`,
+      { chat_id: chatId, message_id: origMessage.message_id }
     );
+
+    if (pending.tweet2) {
+      await bot.sendMessage(chatId, '⏳ מפרסם תגובה בעוד 30 שניות...');
+      await new Promise((r) => setTimeout(r, 30000));
+      try {
+        const result2 = await twitter.postTweet(pending.tweet2, result1.id);
+        stateManager.recordPublished(pending.tweet2, result2.id);
+        await bot.sendMessage(chatId, `✅ תגובה פורסמה!\n\n${pending.tweet2}\n\n🔗 ${result2.url}`);
+      } catch (err) {
+        await bot.sendMessage(chatId, `❌ שגיאה בפרסום התגובה: ${err.message}`);
+      }
+    }
   } catch (err) {
     console.error('[bot] twitter post failed:', err.message);
     await bot.sendMessage(chatId, `❌ שגיאה בפרסום: ${err.message}`);
@@ -125,9 +154,7 @@ async function handleEditRequest(chatId, messageId, origMessage) {
     origMessageId: origMessage.message_id,
   });
 
-  await bot.sendMessage(chatId, '✏️ *מה לשנות?* כתוב לי את ההוראה:', {
-    parse_mode: 'Markdown',
-  });
+  await bot.sendMessage(chatId, '✏️ מה לשנות? כתוב לי את ההוראה:');
 }
 
 async function handleReject(chatId, messageId, origMessage) {
@@ -135,8 +162,8 @@ async function handleReject(chatId, messageId, origMessage) {
   stateManager.removePendingTweet(messageId);
 
   await bot.editMessageText(
-    `❌ *נדחה*\n\n~~${escapeMarkdown(pending?.text || '')}~~`,
-    { chat_id: chatId, message_id: origMessage.message_id, parse_mode: 'Markdown' }
+    `❌ נדחה\n\n${pending?.text || ''}`,
+    { chat_id: chatId, message_id: origMessage.message_id }
   );
 }
 
@@ -150,7 +177,7 @@ async function handleMessage(msg) {
 
   // Only respond to the configured chat id
   if (String(chatId) !== String(process.env.TELEGRAM_CHAT_ID)) {
-    await bot.sendMessage(chatId, `מזהה הצ'אט שלך: \`${chatId}\``, { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, `מזהה הצ'אט שלך: ${chatId}`);
     return;
   }
 
@@ -180,11 +207,10 @@ async function handleEditInstruction(chatId, instruction, editCtx) {
     // Remove old pending and send updated tweet for re-approval
     stateManager.removePendingTweet(editCtx.messageId);
 
-    // Update original message to show it was edited
     try {
       await bot.editMessageText(
-        `✏️ *נערך — ראה גרסה חדשה למטה*`,
-        { chat_id: chatId, message_id: editCtx.origMessageId, parse_mode: 'Markdown' }
+        `✏️ נערך — ראה גרסה חדשה למטה`,
+        { chat_id: chatId, message_id: editCtx.origMessageId }
       );
     } catch {}
 
@@ -246,8 +272,7 @@ async function handleFreeCommand(chatId, text) {
         .join('\n');
       await bot.sendMessage(
         chatId,
-        `📊 *סטטיסטיקות השבוע:*\nפורסמו ${count} ציוצים.\n\n*אחרונים:*\n${lastThree || 'אין עדיין'}`,
-        { parse_mode: 'Markdown' }
+        `📊 סטטיסטיקות השבוע:\nפורסמו ${count} ציוצים.\n\nאחרונים:\n${lastThree || 'אין עדיין'}`
       );
       break;
     }
@@ -291,9 +316,7 @@ async function handleFreeCommand(chatId, text) {
       const summary = Object.entries(changes)
         .map(([k, v]) => `• ${k}: ${JSON.stringify(v)}`)
         .join('\n');
-      await bot.sendMessage(chatId, `✅ *הגדרות עודכנו:*\n${summary}`, {
-        parse_mode: 'Markdown',
-      });
+      await bot.sendMessage(chatId, `✅ הגדרות עודכנו:\n${summary}`);
       break;
     }
 
@@ -353,4 +376,4 @@ async function notify(text) {
   await bot.sendMessage(chatId, text);
 }
 
-module.exports = { createBot, sendTweetForApproval, notify };
+module.exports = { createBot, sendTweetForApproval, sendTweetPairForApproval, notify };

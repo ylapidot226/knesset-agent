@@ -127,6 +127,39 @@ function updateLastFetch() {
   writeState(state);
 }
 
+function todayKey() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+}
+
+function clearSentItemsIfNewDay() {
+  const state = readState();
+  if (!state.sentItemIds) state.sentItemIds = {};
+  const today = todayKey();
+  const keys = Object.keys(state.sentItemIds);
+  const stale = keys.filter((k) => k !== today);
+  if (stale.length) {
+    for (const k of stale) delete state.sentItemIds[k];
+    writeState(state);
+  }
+}
+
+function hasItemBeenSent(itemId) {
+  const state = readState();
+  const today = todayKey();
+  return Array.isArray(state.sentItemIds?.[today]) && state.sentItemIds[today].includes(String(itemId));
+}
+
+function markItemSent(itemId) {
+  const state = readState();
+  if (!state.sentItemIds) state.sentItemIds = {};
+  const today = todayKey();
+  if (!Array.isArray(state.sentItemIds[today])) state.sentItemIds[today] = [];
+  if (!state.sentItemIds[today].includes(String(itemId))) {
+    state.sentItemIds[today].push(String(itemId));
+  }
+  writeState(state);
+}
+
 module.exports = {
   readState,
   writeState,
@@ -144,4 +177,7 @@ module.exports = {
   recordPublished,
   getWeeklyStats,
   updateLastFetch,
+  hasItemBeenSent,
+  markItemSent,
+  clearSentItemsIfNewDay,
 };

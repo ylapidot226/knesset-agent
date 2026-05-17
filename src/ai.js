@@ -264,6 +264,74 @@ function endpointForType(sourceType) {
   return map[sourceType] ?? sourceType;
 }
 
+// ── Tweet pair generation ──────────────────────────────────────────────────
+
+const EXPLAIN_SYSTEM = `אתה עוזר שמסביר חקיקה ופעילות פרלמנטרית בעברית פשוטה לאנשים רגילים.
+הסבר בקצרה מה משמעות הפעולה הפרלמנטרית הזו בחיים האמיתיים.
+אל תמציא עובדות ספציפיות. הסבר את הנושא הכללי בלבד.
+1-3 משפטים קצרים. ללא האשטגים.`;
+
+async function generateTweetPair(item, dayType, config, validIds) {
+  const maxLen = config.maxLength || 200;
+
+  const itemJson = JSON.stringify(item, null, 2);
+
+  const tweet1Prompt = `פריט נתונים מ-OData הכנסת (${dayType}):
+${itemJson}
+
+כתוב ציוץ קצר (עד ${maxLen} תווים) על פריט זה.
+חייב לכלול: שם ח"כ רלוונטי (אם קיים בנתונים), עובדה מספרית אחת, ו-#כנסת + האשטג רלוונטי.
+אסור לציין מידע שאינו בנתונים.
+
+החזר JSON בלבד:
+{
+  "sourceId": <מספר ה-id של הפריט>,
+  "sourceType": "${dayType}",
+  "date": "YYYY-MM-DD",
+  "tweet1": "<הציוץ המלא>"
+}
+
+אם אין מספיק מידע — החזר: null`;
+
+  const raw1 = await chat(STYLE_SYSTEM, tweet1Prompt, 400);
+  if (!raw1 || raw1.trim() === 'null') return null;
+
+  let parsed1;
+  try {
+    const match = raw1.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('no JSON');
+    parsed1 = JSON.parse(match[0]);
+  } catch (e) {
+    console.error('[ai] generateTweetPair tweet1 parse error:', e.message);
+    return null;
+  }
+
+  const { sourceId, sourceType, date, tweet1 } = parsed1;
+  if (!tweet1 || !sourceId) {
+    console.error('[ai] generateTweetPair: missing tweet1 or sourceId');
+    return null;
+  }
+
+  if (validIds && !validIds.has(Number(sourceId)) && !validIds.has(String(sourceId))) {
+    console.error(`[ai] generateTweetPair VERIFY FAILED — sourceId ${sourceId} not in fetched data`);
+    return null;
+  }
+
+  const tweet2Prompt = `פריט פרלמנטרי:
+${itemJson}
+
+הציוץ שנכתב עליו:
+"${tweet1}"
+
+הסבר בעברית פשוטה מה המשמעות המעשית של פעולה פרלמנטרית זו בחיים האמיתיים.
+עד 500 תווים. ללא האשטגים. ללא @mentions.`;
+
+  const tweet2 = await chat(EXPLAIN_SYSTEM, tweet2Prompt, 300);
+  if (!tweet2 || tweet2.trim() === 'null') return null;
+
+  return { tweet1, tweet2, sourceId, sourceType, date };
+}
+
 // ── Rewrite with instruction ───────────────────────────────────────────────
 
 async function rewriteTweet(currentTweet, instruction, config) {
@@ -390,6 +458,7 @@ async function freeChat(userMessage, apiContext = '') {
 
 module.exports = {
   generateTweet,
+  generateTweetPair,
   rewriteTweet,
   interpretCommand,
   generateCustomTweet,

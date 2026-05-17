@@ -1,20 +1,22 @@
-/**
- * Cron scheduler — runs every 2 hours between 09:00 and 21:00 (Israel time).
- * Fetches Knesset data, generates a tweet via Claude, sends to Telegram for approval.
- */
-
 const cron = require('node-cron');
 const stateManager = require('./state');
 const knesset = require('./knesset');
 const ai = require('./ai');
-const { sendTweetForApproval, notify } = require('./bot');
+const { sendTweetPairForApproval, sendTweetForApproval, notify } = require('./bot');
 
-// "At minute 0 of every 2nd hour, from 9 through 21" in Asia/Jerusalem
-// cron expression: 0 9,11,13,15,17,19,21 * * *
 const CRON_EXPR = '0 9,11,13,15,17,19,21 * * *';
 const TZ = 'Asia/Jerusalem';
 
 let cronTask = null;
+
+const DAY_FETCH_MAP = {
+  Sunday:    { fn: () => knesset.fetchNewBillsThisWeek(),         type: 'bills' },
+  Monday:    { fn: () => knesset.fetchTodaysPlenaryAgenda(),      type: 'agenda' },
+  Tuesday:   { fn: () => knesset.fetchRecentVotesWithResults(),   type: 'votes' },
+  Wednesday: { fn: () => knesset.fetchTodaysCommitteeSessions(),  type: 'committees' },
+  Thursday:  { fn: () => knesset.fetchQueriesThisWeek(),          type: 'queries' },
+  Friday:    { fn: () => knesset.fetchWeeklyMKActivity(),         type: 'weekly' },
+};
 
 async function runCycle() {
   if (stateManager.isCronPaused()) {
@@ -28,11 +30,25 @@ async function runCycle() {
     return;
   }
 
-  console.log('[scheduler] starting cycle at', new Date().toISOString());
+  stateManager.clearSentItemsIfNewDay();
 
-  let activity;
+  const dayOfWeek = new Date().toLocaleString('en-US', { weekday: 'long', timeZone: 'Asia/Jerusalem' });
+  console.log('[scheduler] starting cycle at', new Date().toISOString(), 'day:', dayOfWeek);
+
+  if (dayOfWeek === 'Saturday') {
+    console.log('[scheduler] שבת — מדלג');
+    return;
+  }
+
+  const dayConfig = DAY_FETCH_MAP[dayOfWeek];
+  if (!dayConfig) {
+    console.log('[scheduler] לא נמצא config ליום:', dayOfWeek);
+    return;
+  }
+
+  let fetchedItems;
   try {
-    activity = await knesset.fetchRecentActivity();
+    fetchedItems = await dayConfig.fn();
     stateManager.updateLastFetch();
   } catch (err) {
     console.error('[scheduler] knesset fetch failed:', err.message);
@@ -40,41 +56,40 @@ async function runCycle() {
     return;
   }
 
-  const hasActivity =
-    (activity.votes?.length > 0) ||
-    (activity.committeeSessions?.length > 0) ||
-    (activity.plenumSessions?.length > 0) ||
-    (activity.rawSummary?.length > 100);
-
-  if (!hasActivity) {
-    console.log('[scheduler] no activity found — notifying and skipping');
+  if (!fetchedItems || fetchedItems.length === 0) {
+    console.log('[scheduler] no items found');
     await notify('אין נתונים זמינים כרגע מאתר הכנסת');
     return;
   }
 
-  let tweet;
-  try {
-    tweet = await ai.generateTweet(activity, config);
-  } catch (err) {
-    console.error('[scheduler] tweet generation failed:', err.message);
-    await notify(`⚠️ שגיאה ביצירת ציוץ: ${err.message}`);
-    return;
+  const validIds = new Set(fetchedItems.map((i) => i.id));
+  let processed = 0;
+
+  for (const item of fetchedItems) {
+    if (processed >= 5) break;
+    if (stateManager.hasItemBeenSent(item.id)) continue;
+
+    let pair;
+    try {
+      pair = await ai.generateTweetPair(item, dayConfig.type, config, validIds);
+    } catch (err) {
+      console.error('[scheduler] generateTweetPair failed:', err.message);
+      continue;
+    }
+
+    if (!pair) continue;
+
+    stateManager.markItemSent(item.id);
+    try {
+      await sendTweetPairForApproval(pair, { itemId: item.id, source: 'auto' });
+      processed++;
+    } catch (err) {
+      console.error('[scheduler] failed to send pair to Telegram:', err.message);
+    }
   }
 
-  if (!tweet) {
-    console.log('[scheduler] AI returned null — no tweet-worthy content found');
-    return;
-  }
-
-  console.log('[scheduler] sending tweet for approval:', tweet.slice(0, 80) + '...');
-
-  try {
-    await sendTweetForApproval(tweet, {
-      source: 'auto',
-      fetchedAt: activity.fetchedAt,
-    });
-  } catch (err) {
-    console.error('[scheduler] failed to send to Telegram:', err.message);
+  if (processed === 0) {
+    console.log('[scheduler] no new pairs generated this cycle');
   }
 }
 
