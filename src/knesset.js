@@ -327,7 +327,7 @@ async function fetchRecentActivity() {
   if (votesResult.hasData) {
     lines.push(`=== הצבעות (48 שעות אחרונות) | ${votesResult.endpoint} ===`);
     for (const v of votesResult.votes) {
-      lines.push(`• ${v.date} — ${v.title}${v.subject ? ' | ' + v.subject : ''}`);
+      lines.push(`• [ID:${v.id}] ${v.date} — ${v.title}${v.subject ? ' | ' + v.subject : ''}`);
 
       const results = await getVoteResults(v.id);
       usedEndpoints.add(results.endpoint);
@@ -351,7 +351,7 @@ async function fetchRecentActivity() {
     lines.push(`=== ישיבות ועדות ראשיות (7 ימים) | ${cmtResult.endpoint} ===`);
     for (const s of cmtResult.sessions.slice(0, 20)) {
       const numStr = s.number ? ` (ישיבה ${s.number})` : '';
-      lines.push(`• ${s.date} — ${s.committee}${numStr}`);
+      lines.push(`• [ID:${s.id}] ${s.date} — ${s.committee}${numStr}`);
     }
   } else {
     lines.push(`\n[ועדות] ${cmtResult.reason}`);
@@ -400,7 +400,7 @@ async function fetchRecentActivity() {
 
     for (const q of queryRows.slice(0, 10)) {
       const mk = nameMap[q.PersonID] ?? `PersonID:${q.PersonID}`;
-      lines.push(`• ${q.SubmitDate?.slice(0, 10)} — ${mk}: "${q.Name}" (${q.TypeDesc})`);
+      lines.push(`• [ID:${q.Id}] ${q.SubmitDate?.slice(0, 10)} — ${mk}: "${q.Name}" (${q.TypeDesc})`);
     }
   }
 
@@ -414,7 +414,7 @@ async function fetchRecentActivity() {
     lines.push('');
     lines.push(`=== הצעות חוק אחרונות | ${billEp} ===`);
     for (const b of billRows.slice(0, 8)) {
-      lines.push(`• ${b.LastUpdatedDate?.slice(0, 10)} — ${b.Name} (${b.SubTypeDesc})`);
+      lines.push(`• [ID:${b.Id}] ${b.LastUpdatedDate?.slice(0, 10)} — ${b.Name} (${b.SubTypeDesc})`);
     }
   }
 
@@ -427,13 +427,27 @@ async function fetchRecentActivity() {
   const rawSummary = lines.join('\n');
   console.log('[knesset] endpoints:', endpoints.map((e) => e.split('/').pop()).join(', '));
 
+  const votes         = votesResult.hasData ? votesResult.votes : [];
+  const cmtSessions   = cmtResult.hasData ? cmtResult.sessions : [];
+  const plmSessions   = sessResult.hasData ? sessResult.sessions : [];
+
+  // Flat set of all valid IDs for tweet verification
+  const validIds = new Set([
+    ...votes.map((v) => v.id),
+    ...cmtSessions.map((s) => s.id),
+    ...plmSessions.map((s) => s.id),
+    ...queryRows.map((q) => q.Id),
+    ...billRows.map((b) => b.Id),
+  ]);
+
   return {
-    fetchedAt:     new Date().toISOString(),
+    fetchedAt:         new Date().toISOString(),
     rawSummary,
-    usedEndpoints: endpoints,
-    votes:         votesResult.hasData ? votesResult.votes : [],
-    committeeSessions: cmtResult.hasData ? cmtResult.sessions : [],
-    plenumSessions: sessResult.hasData ? sessResult.sessions : [],
+    usedEndpoints:     endpoints,
+    votes,
+    committeeSessions: cmtSessions,
+    plenumSessions:    plmSessions,
+    validIds,
   };
 }
 

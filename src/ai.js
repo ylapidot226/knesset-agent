@@ -174,12 +174,11 @@ async function chat(systemPrompt, userPrompt, maxTokens = 500) {
 async function generateTweet(activityData, config) {
   const maxLen = config.maxLength || 250;
   const topics = (config.preferredTopics || []).join(', ');
-  const hashtags = config.includeHashtags ? 'כן' : 'לא';
   const styleNotes = config.styleNotes || '';
 
   const endpointsUsed = activityData?.usedEndpoints?.join(', ') ?? 'OData רשמי של הכנסת';
   const dataText = activityData?.rawSummary
-    ? `נתונים רשמיים מ-OData הכנסת (${activityData.fetchedAt?.slice(0, 10)}):\nendpoints: ${endpointsUsed}\n\n${activityData.rawSummary}`
+    ? `נתונים רשמיים מ-OData הכנסת (${activityData.fetchedAt?.slice(0, 10)}):\n\n${activityData.rawSummary}`
     : `נתוני כנסת:\n${JSON.stringify(activityData, null, 2)}`;
 
   const topicsLine = topics ? `נושאים מועדפים: ${topics}` : '';
@@ -187,7 +186,9 @@ async function generateTweet(activityData, config) {
 
   const prompt = `${dataText}
 
-הנתונים שלמעלה הם אמיתיים ומאומתים. בחר מהם עובדה אחת מעניינת וכתוב ציוץ.
+הנתונים שלמעלה הם אמיתיים. כל שורת נתון מכילה [ID:X] — זה המזהה הרשמי ב-OData.
+
+בחר רשומה אחת מעניינת וכתוב עליה ציוץ.
 
 מבנה הציוץ:
 - 3-4 שורות קצרות, כל שורה = עובדה אחת
@@ -203,21 +204,64 @@ ${styleNotesLine}
 - אסור לציין מקורות חדשות (ynet, וואלה, הארץ, ישראל היום וכו')
 - אסור להוסיף "@ידיות" — ה-API אינו מכיל ידיות טוויטר
 - אסור להשתמש במידע שלא הופיע במפורש בנתונים שלמעלה
-- אם עובדה אינה בנתונים — לא לכתוב אותה
 
-החזר את הציוץ בלבד — ללא הסברים, ללא כותרת, ללא מרכאות.
-null — רק אם הנתונים ריקים לחלוטין.`;
+החזר JSON בלבד בפורמט הזה:
+{
+  "sourceId": <המספר מה-[ID:X] של הרשומה שבחרת>,
+  "sourceType": "vote" | "committee" | "session" | "query" | "bill",
+  "date": "YYYY-MM-DD",
+  "tweet": "<הציוץ המלא>"
+}
 
-  const text = await chat(STYLE_SYSTEM, prompt);
-  if (!text || text === 'null') return null;
+אם הנתונים ריקים לחלוטין — החזר: null`;
 
-  if (!validateTweetFacts(text, activityData)) {
+  const raw = await chat(STYLE_SYSTEM, prompt);
+  if (!raw || raw.trim() === 'null') return null;
+
+  let parsed;
+  try {
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('no JSON found');
+    parsed = JSON.parse(match[0]);
+  } catch (e) {
+    console.error('[ai] failed to parse structured response:', e.message, '| raw:', raw.slice(0, 200));
+    return null;
+  }
+
+  const { sourceId, sourceType, date, tweet } = parsed;
+
+  if (!tweet || !sourceId) {
+    console.error('[ai] missing tweet or sourceId in response');
+    return null;
+  }
+
+  // Verify sourceId exists in the actual fetched data
+  const validIds = activityData?.validIds;
+  if (validIds && !validIds.has(Number(sourceId)) && !validIds.has(String(sourceId))) {
+    console.error(`[ai] VERIFY FAILED — sourceId ${sourceId} (${sourceType}) not in fetched data. Possible hallucination.`);
+    return null;
+  }
+
+  const endpoint = endpointForType(sourceType);
+  console.log(`[VERIFY] ציוץ מבוסס על: endpoint=${endpoint}, ID=${sourceId}, תאריך=${date}`);
+
+  if (!validateTweetFacts(tweet, activityData)) {
     console.error('[ai] tweet rejected by fact validator — not publishing');
     return null;
   }
 
-  console.log(`[ai] tweet passed validation (endpoints: ${endpointsUsed})`);
-  return text;
+  return tweet;
+}
+
+function endpointForType(sourceType) {
+  const map = {
+    vote:      'KNS_PlenumVote',
+    committee: 'KNS_CommitteeSession',
+    session:   'KNS_PlenumSession',
+    query:     'KNS_Query',
+    bill:      'KNS_Bill',
+  };
+  return map[sourceType] ?? sourceType;
 }
 
 // ── Rewrite with instruction ───────────────────────────────────────────────

@@ -47,7 +47,8 @@ async function runCycle() {
     (activity.rawSummary?.length > 100);
 
   if (!hasActivity) {
-    console.log('[scheduler] no activity found — skipping this cycle');
+    console.log('[scheduler] no activity found — notifying and skipping');
+    await notify('אין נתונים זמינים כרגע מאתר הכנסת');
     return;
   }
 
