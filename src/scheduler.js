@@ -2,21 +2,21 @@ const cron = require('node-cron');
 const stateManager = require('./state');
 const knesset = require('./knesset');
 const ai = require('./ai');
-const { sendTweetPairForApproval, sendTweetForApproval, notify } = require('./bot');
+const { sendTweetPairForApproval, flushQueue, notify } = require('./bot');
 
-const CRON_EXPR = '0 8-22 * * *';
+const CRON_EXPR = '*/30 8-23 * * *';
 const TZ = 'Asia/Jerusalem';
+const MAX_PER_ENTITY = 3;
+
+const FETCH_SPECS = [
+  { entity: 'KNS_PlenumSession',    fn: (id) => knesset.fetchNewSincePlenumSessions(id),    type: 'session'    },
+  { entity: 'KNS_PlenumVote',       fn: (id) => knesset.fetchNewSinceVotes(id),             type: 'votes'      },
+  { entity: 'KNS_CommitteeSession', fn: (id) => knesset.fetchNewSinceCommitteeSessions(id), type: 'committees' },
+  { entity: 'KNS_Bill',             fn: (id) => knesset.fetchNewSinceBills(id),             type: 'bills'      },
+  { entity: 'KNS_Query',            fn: (id) => knesset.fetchNewSinceQueries(id),           type: 'queries'    },
+];
 
 let cronTask = null;
-
-const DAY_FETCH_MAP = {
-  Sunday:    { fn: () => knesset.fetchNewBillsThisWeek(),         type: 'bills' },
-  Monday:    { fn: () => knesset.fetchTodaysPlenaryAgenda(),      type: 'agenda' },
-  Tuesday:   { fn: () => knesset.fetchRecentVotesWithResults(),   type: 'votes' },
-  Wednesday: { fn: () => knesset.fetchTodaysCommitteeSessions(),  type: 'committees' },
-  Thursday:  { fn: () => knesset.fetchQueriesThisWeek(),          type: 'queries' },
-  Friday:    { fn: () => knesset.fetchWeeklyMKActivity(),         type: 'weekly' },
-};
 
 async function runCycle() {
   if (stateManager.isCronPaused()) {
@@ -31,65 +31,81 @@ async function runCycle() {
   }
 
   stateManager.clearSentItemsIfNewDay();
+  console.log('[scheduler] starting cycle at', new Date().toISOString());
 
-  const dayOfWeek = new Date().toLocaleString('en-US', { weekday: 'long', timeZone: 'Asia/Jerusalem' });
-  console.log('[scheduler] starting cycle at', new Date().toISOString(), 'day:', dayOfWeek);
+  for (const spec of FETCH_SPECS) {
+    const sinceId = stateManager.getLastSeenId(spec.entity);
+    console.log(`[scheduler] checking ${spec.entity} since id=${sinceId}`);
 
-  if (dayOfWeek === 'Saturday') {
-    console.log('[scheduler] שבת — מדלג');
-    return;
-  }
-
-  const dayConfig = DAY_FETCH_MAP[dayOfWeek];
-  if (!dayConfig) {
-    console.log('[scheduler] לא נמצא config ליום:', dayOfWeek);
-    return;
-  }
-
-  let fetchedItems;
-  try {
-    fetchedItems = await dayConfig.fn();
-    stateManager.updateLastFetch();
-  } catch (err) {
-    console.error('[scheduler] knesset fetch failed:', err.message);
-    await notify(`⚠️ שגיאה בשליפת נתוני כנסת: ${err.message}`);
-    return;
-  }
-
-  if (!fetchedItems || fetchedItems.length === 0) {
-    console.log('[scheduler] no items found');
-    await notify('אין נתונים זמינים כרגע מאתר הכנסת');
-    return;
-  }
-
-  const validIds = new Set(fetchedItems.map((i) => i.id));
-  let processed = 0;
-
-  for (const item of fetchedItems) {
-    if (processed >= 50) break;
-    if (stateManager.hasItemBeenSent(item.id)) continue;
-
-    let pair;
+    let items;
     try {
-      pair = await ai.generateTweetPair(item, dayConfig.type, config, validIds);
+      items = await spec.fn(sinceId);
+      stateManager.updateLastFetch();
     } catch (err) {
-      console.error('[scheduler] generateTweetPair failed:', err.message);
+      console.error(`[scheduler] fetch failed for ${spec.entity}:`, err.message);
+      await notify(`⚠️ שגיאה בשליפת ${spec.entity}: ${err.message}`);
       continue;
     }
 
-    if (!pair) continue;
+    if (!items || items.length === 0) {
+      console.log(`[scheduler] no new items for ${spec.entity}`);
+      continue;
+    }
 
-    stateManager.markItemSent(item.id);
-    try {
-      await sendTweetPairForApproval(pair, { itemId: item.id, source: 'auto' });
-      processed++;
-    } catch (err) {
-      console.error('[scheduler] failed to send pair to Telegram:', err.message);
+    items.sort((a, b) => a.id - b.id);
+
+    const tz = 'Asia/Jerusalem';
+    const today     = new Date().toLocaleDateString('en-CA', { timeZone: tz });
+    const yesterday = new Date(Date.now() - 86400000).toLocaleDateString('en-CA', { timeZone: tz });
+    const recentItems = items.filter((i) => {
+      const d = i.activityDate ?? i.date;
+      return !d || d >= yesterday;
+    });
+
+    if (recentItems.length === 0) {
+      console.log(`[scheduler] no recent items (today/yesterday) for ${spec.entity}`);
+      continue;
+    }
+
+    const validIds = new Set(recentItems.map((i) => i.id));
+
+    let sent = 0;
+    for (const item of recentItems) {
+      if (stateManager.hasItemBeenSent(item.id)) {
+        stateManager.setLastSeenId(spec.entity, item.id);
+        continue;
+      }
+
+      if (sent >= MAX_PER_ENTITY) {
+        console.log(`[scheduler] hit limit of ${MAX_PER_ENTITY} for ${spec.entity}, stopping (next cycle continues from id=${item.id - 1})`);
+        break;
+      }
+
+      let pair;
+      try {
+        pair = await ai.generateTweetPair(item, spec.type, config, validIds);
+      } catch (err) {
+        console.error(`[scheduler] generateTweetPair failed for ${spec.entity} id=${item.id}:`, err.message);
+        stateManager.setLastSeenId(spec.entity, item.id);
+        continue;
+      }
+
+      if (!pair) {
+        stateManager.setLastSeenId(spec.entity, item.id);
+        continue;
+      }
+
+      stateManager.enqueue(pair, { itemId: item.id, source: 'auto', entity: spec.entity });
+      stateManager.markItemSent(item.id);
+      stateManager.setLastSeenId(spec.entity, item.id);
+      sent++;
+      console.log(`[scheduler] queued pair for ${spec.entity} id=${item.id}`);
     }
   }
 
-  if (processed === 0) {
-    console.log('[scheduler] no new pairs generated this cycle');
+  if (sent > 0) {
+    console.log(`[scheduler] ${sent} pairs queued — flushing first`);
+    await flushQueue();
   }
 }
 

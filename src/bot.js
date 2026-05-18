@@ -138,6 +138,8 @@ async function handleApprove(chatId, messageId, origMessage) {
     console.error('[bot] twitter post failed:', err.message);
     await bot.sendMessage(chatId, `❌ שגיאה בפרסום: ${err.message}`);
   }
+
+  await flushQueue();
 }
 
 async function handleEditRequest(chatId, messageId, origMessage) {
@@ -165,6 +167,8 @@ async function handleReject(chatId, messageId, origMessage) {
     `❌ נדחה\n\n${pending?.text || ''}`,
     { chat_id: chatId, message_id: origMessage.message_id }
   );
+
+  await flushQueue();
 }
 
 // ── Message handler ────────────────────────────────────────────────────────
@@ -215,6 +219,7 @@ async function handleEditInstruction(chatId, instruction, editCtx) {
     } catch {}
 
     await sendTweetForApproval(updated, { editedFrom: editCtx.originalText });
+    // no flushQueue here — the re-sent tweet is itself pending approval
   } catch (err) {
     console.error('[bot] rewrite failed:', err.message);
     await bot.editMessageText(`❌ שגיאה בעריכה: ${err.message}`, {
@@ -361,6 +366,20 @@ async function handleFreeCommand(chatId, text) {
   }
 }
 
+// ── Queue flush ────────────────────────────────────────────────────────────
+
+async function flushQueue() {
+  if (stateManager.hasPendingApprovals()) return;
+  const item = stateManager.dequeue();
+  if (!item) return;
+  const qLen = stateManager.getQueueLength();
+  if (qLen > 0) {
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+    await bot.sendMessage(chatId, `📋 עוד ${qLen} ציוצים בתור`);
+  }
+  await sendTweetPairForApproval(item.pair, item.meta);
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function escapeMarkdown(text) {
@@ -376,4 +395,4 @@ async function notify(text) {
   await bot.sendMessage(chatId, text);
 }
 
-module.exports = { createBot, sendTweetForApproval, sendTweetPairForApproval, notify };
+module.exports = { createBot, sendTweetForApproval, sendTweetPairForApproval, flushQueue, notify };

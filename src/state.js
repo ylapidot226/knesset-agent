@@ -160,6 +160,50 @@ function markItemSent(itemId) {
   writeState(state);
 }
 
+// ── Tweet queue ───────────────────────────────────────────────────────────
+
+function enqueue(pair, meta) {
+  const state = readState();
+  if (!Array.isArray(state.tweetQueue)) state.tweetQueue = [];
+  state.tweetQueue.push({ pair, meta });
+  writeState(state);
+}
+
+function dequeue() {
+  const state = readState();
+  if (!Array.isArray(state.tweetQueue) || state.tweetQueue.length === 0) return null;
+  const item = state.tweetQueue.shift();
+  writeState(state);
+  return item;
+}
+
+function getQueueLength() {
+  const state = readState();
+  return (state.tweetQueue || []).length;
+}
+
+function hasPendingApprovals() {
+  const state = readState();
+  return Object.keys(state.pendingTweets || {}).length > 0;
+}
+
+// ── Last-seen ID watermarks (per entity) ──────────────────────────────────
+
+function getLastSeenId(entity) {
+  const state = readState();
+  return state.lastSeenIds?.[entity] ?? 0;
+}
+
+function setLastSeenId(entity, id) {
+  if (!id || id <= 0) return;
+  const state = readState();
+  if (!state.lastSeenIds) state.lastSeenIds = {};
+  if (id > (state.lastSeenIds[entity] ?? 0)) {
+    state.lastSeenIds[entity] = id;
+    writeState(state);
+  }
+}
+
 module.exports = {
   readState,
   writeState,
@@ -180,4 +224,10 @@ module.exports = {
   hasItemBeenSent,
   markItemSent,
   clearSentItemsIfNewDay,
+  getLastSeenId,
+  setLastSeenId,
+  enqueue,
+  dequeue,
+  getQueueLength,
+  hasPendingApprovals,
 };

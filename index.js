@@ -45,7 +45,7 @@ async function main() {
   // Start cron scheduler
   startScheduler();
 
-  await notify('🚀 הסוכן עלה! שולח ציוצים כל 2 שעות בין 9:00 ל-21:00.');
+  await notify('הסוכן עלה. בדיקות כל 30 דקות בין 8:00 ל-23:30.');
 
   console.log('=== Agent running ===');
 }

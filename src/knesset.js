@@ -29,6 +29,26 @@ const BASE         = 'https://knesset.gov.il/OdataV4/ParliamentInfo';
 const KNESSET_NUM  = 25;
 const MK_TOTAL     = 120;
 
+// KNS_Bill StatusID → Hebrew stage description (verified against live data)
+const BILL_STATUS_MAP = {
+  1:   'הוגשה',
+  2:   'הוגשה',
+  101: 'קריאה ראשונה',
+  102: 'קריאה ראשונה',
+  103: 'הכנה לקריאה ראשונה',
+  104: 'הכנה לקריאה שנייה ושלישית',
+  107: 'ועדה',
+  108: 'ועדה',
+  113: 'קריאה שנייה ושלישית',
+  114: 'קריאה שנייה ושלישית',
+  118: 'אושרה — חוק',
+  150: 'הכנה לקריאה ראשונה',
+  160: 'נפלה',
+  161: 'נפלה',
+  162: 'נפלה',
+  170: 'בוטלה',
+};
+
 // ── Generic OData helper ──────────────────────────────────────────────────
 
 async function odata(entity, qs = '') {
@@ -542,6 +562,36 @@ async function fetchFactionMembers(factionNameQuery) {
   return { members, factionName: matched, endpoint };
 }
 
+// ── Faction helpers ───────────────────────────────────────────────────────
+
+async function getAllMKFactions() {
+  // API caps at 100 rows — paginate with $skip to get all records
+  const map = {};
+  let skip = 0;
+  while (true) {
+    const qs = `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and IsCurrent eq true`)}&$select=PersonID,FactionName&$top=100&$skip=${skip}`;
+    const { data } = await odata('KNS_PersonToPosition', qs);
+    for (const row of data) {
+      if (row.PersonID && row.FactionName) {
+        map[row.PersonID] = row.FactionName.trim();
+      }
+    }
+    if (data.length < 100) break;
+    skip += 100;
+  }
+  return map;
+}
+
+async function fetchPersonFactions(personIds) {
+  if (!personIds.length) return {};
+  const factionMap = await getAllMKFactions();
+  const result = {};
+  for (const id of personIds) {
+    result[id] = factionMap[id] ?? null;
+  }
+  return result;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 async function findPersonByName(name) {
@@ -598,18 +648,31 @@ async function fetchNewBillsThisWeek() {
   const since = isoAgo(7);
   const { data: bills, endpoint } = await odata(
     'KNS_Bill',
-    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and LastUpdatedDate gt ${since}`)}&$orderby=Id desc&$top=30&$expand=KNS_BillInitiator($expand=KNS_Person)&$select=Id,Name,SubTypeDesc,LastUpdatedDate`
+    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and LastUpdatedDate gt ${since}`)}&$orderby=LastUpdatedDate desc&$top=50&$expand=KNS_BillInitiator($expand=KNS_Person)&$select=Id,Name,SubTypeDesc,StatusID,LastUpdatedDate`
   );
   if (!bills.length) return [];
 
-  return bills
+  const currentYear = new Date().getFullYear();
+  const items = bills
     .map((b) => {
       const initiatorRow = b.KNS_BillInitiator?.find((r) => r.IsInitiator);
       const p = initiatorRow?.KNS_Person;
       const initiator = p ? `${p.FirstName} ${p.LastName}`.trim() : null;
-      return { id: b.Id, name: b.Name, type: b.SubTypeDesc, date: b.LastUpdatedDate?.slice(0, 10) ?? null, initiator, endpoint };
+      const personId = initiatorRow?.PersonID ?? null;
+      const activityDate   = b.LastUpdatedDate?.slice(0, 10) ?? null;
+      const submissionDate = initiatorRow?.LastUpdatedDate?.slice(0, 10) ?? activityDate;
+      const isNewBill      = activityDate && submissionDate
+        ? (new Date(activityDate) - new Date(submissionDate)) / 86400000 <= 7
+        : false;
+      const statusDesc = BILL_STATUS_MAP[b.StatusID] ?? null;
+
+      return { id: b.Id, name: b.Name, type: b.SubTypeDesc, statusDesc, activityDate, submissionDate, isNewBill, initiator, personId, endpoint };
     })
-    .filter((b) => b.initiator !== null);
+    .filter((b) => b !== null && b.initiator !== null);
+
+  const personIds = [...new Set(items.map((b) => b.personId).filter(Boolean))];
+  const factions = personIds.length ? await fetchPersonFactions(personIds) : {};
+  return items.map((b) => ({ ...b, factionName: b.personId ? (factions[b.personId] ?? null) : null }));
 }
 
 async function fetchTodaysPlenaryAgenda() {
@@ -715,6 +778,8 @@ async function fetchQueriesThisWeek() {
   const personIds = [...new Set(queries.map((q) => q.PersonID).filter(Boolean))];
   const nameMap = personIds.length ? await fetchPersonNames(personIds) : {};
 
+  const factions = personIds.length ? await fetchPersonFactions(personIds) : {};
+
   return queries.map((q) => {
     const docUrl = q.KNS_DocumentQuery?.find((d) => d.ApplicationDesc === 'PDF')?.FilePath ?? null;
     return {
@@ -724,6 +789,7 @@ async function fetchQueriesThisWeek() {
       date: q.SubmitDate?.slice(0, 10) ?? null,
       personId: q.PersonID ?? null,
       mkName: q.PersonID ? (nameMap[q.PersonID] ?? null) : null,
+      factionName: q.PersonID ? (factions[q.PersonID] ?? null) : null,
       docUrl,
       endpoint,
     };
@@ -760,11 +826,13 @@ async function fetchWeeklyMKActivity() {
     ...Object.keys(billCountByPerson).map(Number),
   ])];
 
-  const nameMap = allPersonIds.length ? await fetchPersonNames(allPersonIds) : {};
+  const nameMap    = allPersonIds.length ? await fetchPersonNames(allPersonIds) : {};
+  const factionMap = allPersonIds.length ? await fetchPersonFactions(allPersonIds) : {};
 
   const merged = allPersonIds.map((personId) => ({
     personId,
     mkName: nameMap[personId] ?? `PersonID:${personId}`,
+    factionName: factionMap[personId] ?? null,
     queryCount: queryCountByPerson[personId] || 0,
     billCount: billCountByPerson[personId] || 0,
     endpoint: qEp,
@@ -772,6 +840,132 @@ async function fetchWeeklyMKActivity() {
 
   merged.sort((a, b) => (b.queryCount + b.billCount) - (a.queryCount + a.billCount));
   return merged.slice(0, 15);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Polling fetch functions — sinceId watermark approach
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function fetchNewSincePlenumSessions(sinceId) {
+  const filter = sinceId > 0
+    ? `KnessetNum eq ${KNESSET_NUM} and Id gt ${sinceId}`
+    : `KnessetNum eq ${KNESSET_NUM} and StartDate gt ${isoAgo(1)}`;
+  const { data, endpoint } = await odata('KNS_PlenumSession',
+    `$filter=${encodeURIComponent(filter)}&$orderby=Id asc&$top=10&$select=Id,Number,Name,StartDate`
+  );
+  return data.map((s) => ({
+    id:       s.Id,
+    name:     s.Name ?? `ישיבת מליאה ${s.Number}`,
+    number:   s.Number,
+    date:     s.StartDate?.slice(0, 10) ?? null,
+    endpoint,
+  }));
+}
+
+async function fetchNewSinceVotes(sinceId) {
+  const filter = sinceId > 0
+    ? `Id gt ${sinceId}`
+    : `VoteDateTime gt ${isoAgo(1)}`;
+  const { data: votes, endpoint } = await odata('KNS_PlenumVote',
+    `$filter=${encodeURIComponent(filter)}&$orderby=Id asc&$top=10&$select=Id,VoteDateTime,VoteTitle,VoteSubject`
+  );
+  const enriched = [];
+  for (const v of votes) {
+    const results = await getVoteResults(v.Id);
+    enriched.push({
+      id:      v.Id,
+      name:    v.VoteTitle ?? v.VoteSubject ?? `הצבעה ${v.Id}`,
+      date:    v.VoteDateTime?.slice(0, 10) ?? null,
+      counts:  results.hasData ? results.counts : null,
+      absent:  results.hasData ? MK_TOTAL - results.total : null,
+      endpoint,
+    });
+  }
+  return enriched;
+}
+
+async function fetchNewSinceCommitteeSessions(sinceId) {
+  const { data: committees } = await odata('KNS_Committee',
+    `$filter=${encodeURIComponent(`KnessetNum eq ${KNESSET_NUM} and CommitteeTypeID eq 71 and IsCurrent eq true`)}&$select=Id,Name`
+  );
+  if (!committees.length) return [];
+  const nameById     = Object.fromEntries(committees.map((c) => [c.Id, c.Name]));
+  const committeeIds = committees.map((c) => c.Id);
+
+  const idFilter   = committeeIds.map((id) => `CommitteeID eq ${id}`).join(' or ');
+  const sinceFilter = sinceId > 0 ? ` and Id gt ${sinceId}` : ` and StartDate gt ${isoAgo(1)}`;
+  const filter      = `(${idFilter}) and StatusID ne 193${sinceFilter}`;
+
+  const { data: sessions, endpoint } = await odata('KNS_CommitteeSession',
+    `$filter=${encodeURIComponent(filter)}&$orderby=Id asc&$top=10&$select=Id,CommitteeID,StartDate,Number&$expand=KNS_CmtSessionItem`
+  );
+  return sessions.map((s) => ({
+    id:        s.Id,
+    name:      nameById[s.CommitteeID] ?? `ועדה ${s.CommitteeID}`,
+    committee: nameById[s.CommitteeID] ?? `ועדה ${s.CommitteeID}`,
+    date:      s.StartDate?.slice(0, 10) ?? null,
+    number:    s.Number ?? null,
+    items:     (s.KNS_CmtSessionItem ?? []).map((i) => i.Name).filter(Boolean).slice(0, 3),
+    endpoint,
+  }));
+}
+
+const HOT_BILL_STATUSES = new Set([101, 102, 113, 114, 118, 160, 161, 162]);
+
+async function fetchNewSinceBills(_sinceId) {
+  const statusFilter = [...HOT_BILL_STATUSES].map((s) => `StatusID eq ${s}`).join(' or ');
+  const filter = `KnessetNum eq ${KNESSET_NUM} and LastUpdatedDate gt ${isoAgo(2)} and (${statusFilter})`;
+  const { data: bills, endpoint } = await odata('KNS_Bill',
+    `$filter=${encodeURIComponent(filter)}&$orderby=Id asc&$top=10&$expand=KNS_BillInitiator($expand=KNS_Person)&$select=Id,Name,SubTypeDesc,StatusID,LastUpdatedDate`
+  );
+  if (!bills.length) return [];
+
+  const items = bills
+    .map((b) => {
+      const initiatorRow   = b.KNS_BillInitiator?.find((r) => r.IsInitiator);
+      const p              = initiatorRow?.KNS_Person;
+      const initiator      = p ? `${p.FirstName} ${p.LastName}`.trim() : null;
+      const personId       = initiatorRow?.PersonID ?? null;
+      const activityDate   = b.LastUpdatedDate?.slice(0, 10) ?? null;
+      const submissionDate = initiatorRow?.LastUpdatedDate?.slice(0, 10) ?? activityDate;
+      const statusDesc     = BILL_STATUS_MAP[b.StatusID] ?? null;
+      const twoDaysAgo     = isoAgo(2).slice(0, 10);
+      const isNewBill      = submissionDate != null && submissionDate >= twoDaysAgo;
+      const billUrl        = `https://main.knesset.gov.il/Activity/Legislation/Laws/Pages/LawBill.aspx?t=lawbill2&lawitemid=${b.Id}`;
+      return { id: b.Id, name: b.Name, type: b.SubTypeDesc, statusDesc, activityDate, submissionDate, isNewBill, initiator, personId, endpoint: billUrl };
+    })
+    .filter((b) => b.initiator !== null);
+
+  if (!items.length) return [];
+  const personIds  = [...new Set(items.map((b) => b.personId).filter(Boolean))];
+  const factions   = personIds.length ? await fetchPersonFactions(personIds) : {};
+  return items.map((b) => ({ ...b, factionName: b.personId ? (factions[b.personId] ?? null) : null }));
+}
+
+async function fetchNewSinceQueries(sinceId) {
+  const filter = sinceId > 0
+    ? `KnessetNum eq ${KNESSET_NUM} and Id gt ${sinceId}`
+    : `KnessetNum eq ${KNESSET_NUM} and SubmitDate gt ${isoAgo(1)}`;
+  const { data: queries, endpoint } = await odata('KNS_Query',
+    `$filter=${encodeURIComponent(filter)}&$orderby=Id asc&$top=10&$select=Id,Name,TypeDesc,SubmitDate,PersonID&$expand=KNS_DocumentQuery`
+  );
+  if (!queries.length) return [];
+
+  const personIds = [...new Set(queries.map((q) => q.PersonID).filter(Boolean))];
+  const nameMap   = personIds.length ? await fetchPersonNames(personIds) : {};
+  const factions  = personIds.length ? await fetchPersonFactions(personIds) : {};
+
+  return queries.map((q) => ({
+    id:          q.Id,
+    name:        q.Name,
+    type:        q.TypeDesc,
+    date:        q.SubmitDate?.slice(0, 10) ?? null,
+    personId:    q.PersonID ?? null,
+    mkName:      q.PersonID ? (nameMap[q.PersonID] ?? null) : null,
+    factionName: q.PersonID ? (factions[q.PersonID] ?? null) : null,
+    docUrl:      q.KNS_DocumentQuery?.find((d) => d.ApplicationDesc === 'PDF')?.FilePath ?? null,
+    endpoint,
+  }));
 }
 
 // ── Legacy shims (used by bot.js / scheduler.js) ──────────────────────────
@@ -822,4 +1016,13 @@ module.exports = {
   findMemberByName,
   getCommitteeMeetings,
   getMemberRecentVotes,
+  // Faction helpers
+  getAllMKFactions,
+  fetchPersonFactions,
+  // Watermark-based polling
+  fetchNewSincePlenumSessions,
+  fetchNewSinceVotes,
+  fetchNewSinceCommitteeSessions,
+  fetchNewSinceBills,
+  fetchNewSinceQueries,
 };
