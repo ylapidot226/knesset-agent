@@ -79,6 +79,13 @@ function isoAgo(days = 0, hours = 0) {
     .replace('.000Z', 'Z');
 }
 
+const FRESHNESS_HOURS = 48;
+function isFresh(dateStr) {
+  if (!dateStr) return false;
+  const cutoff = Date.now() - FRESHNESS_HOURS * 60 * 60 * 1000;
+  return new Date(dateStr).getTime() >= cutoff;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Core API functions (per spec)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -853,13 +860,15 @@ async function fetchNewSincePlenumSessions(sinceId) {
   const { data, endpoint } = await odata('KNS_PlenumSession',
     `$filter=${encodeURIComponent(filter)}&$orderby=Id asc&$top=10&$select=Id,Number,Name,StartDate`
   );
-  return data.map((s) => ({
-    id:       s.Id,
-    name:     s.Name ?? `ישיבת מליאה ${s.Number}`,
-    number:   s.Number,
-    date:     s.StartDate?.slice(0, 10) ?? null,
-    endpoint,
-  }));
+  return data
+    .filter((s) => isFresh(s.StartDate))
+    .map((s) => ({
+      id:       s.Id,
+      name:     s.Name ?? `ישיבת מליאה ${s.Number}`,
+      number:   s.Number,
+      date:     s.StartDate?.slice(0, 10) ?? null,
+      endpoint,
+    }));
 }
 
 async function fetchNewSinceVotes(sinceId) {
@@ -871,6 +880,10 @@ async function fetchNewSinceVotes(sinceId) {
   );
   const enriched = [];
   for (const v of votes) {
+    if (!isFresh(v.VoteDateTime)) {
+      console.log(`[SKIP] הצבעה ישנה — ${v.VoteDateTime}`);
+      continue;
+    }
     const results = await getVoteResults(v.Id);
     enriched.push({
       id:      v.Id,
@@ -899,15 +912,23 @@ async function fetchNewSinceCommitteeSessions(sinceId) {
   const { data: sessions, endpoint } = await odata('KNS_CommitteeSession',
     `$filter=${encodeURIComponent(filter)}&$orderby=Id asc&$top=10&$select=Id,CommitteeID,StartDate,Number&$expand=KNS_CmtSessionItem`
   );
-  return sessions.map((s) => ({
-    id:        s.Id,
-    name:      nameById[s.CommitteeID] ?? `ועדה ${s.CommitteeID}`,
-    committee: nameById[s.CommitteeID] ?? `ועדה ${s.CommitteeID}`,
-    date:      s.StartDate?.slice(0, 10) ?? null,
-    number:    s.Number ?? null,
-    items:     (s.KNS_CmtSessionItem ?? []).map((i) => i.Name).filter(Boolean).slice(0, 3),
-    endpoint,
-  }));
+  return sessions
+    .filter((s) => {
+      if (!isFresh(s.StartDate)) {
+        console.log(`[SKIP] ישיבת ועדה ישנה — ${s.StartDate}`);
+        return false;
+      }
+      return true;
+    })
+    .map((s) => ({
+      id:        s.Id,
+      name:      nameById[s.CommitteeID] ?? `ועדה ${s.CommitteeID}`,
+      committee: nameById[s.CommitteeID] ?? `ועדה ${s.CommitteeID}`,
+      date:      s.StartDate?.slice(0, 10) ?? null,
+      number:    s.Number ?? null,
+      items:     (s.KNS_CmtSessionItem ?? []).map((i) => i.Name).filter(Boolean).slice(0, 3),
+      endpoint,
+    }));
 }
 
 const HOT_BILL_STATUSES = new Set([101, 102, 113, 114, 118, 160, 161, 162]);
@@ -921,6 +942,13 @@ async function fetchNewSinceBills(_sinceId) {
   if (!bills.length) return [];
 
   const items = bills
+    .filter((b) => {
+      if (!isFresh(b.LastUpdatedDate)) {
+        console.log(`[SKIP] חוק ישן — ${b.LastUpdatedDate}`);
+        return false;
+      }
+      return true;
+    })
     .map((b) => {
       const initiatorRow   = b.KNS_BillInitiator?.find((r) => r.IsInitiator);
       const p              = initiatorRow?.KNS_Person;
@@ -955,17 +983,25 @@ async function fetchNewSinceQueries(sinceId) {
   const nameMap   = personIds.length ? await fetchPersonNames(personIds) : {};
   const factions  = personIds.length ? await fetchPersonFactions(personIds) : {};
 
-  return queries.map((q) => ({
-    id:          q.Id,
-    name:        q.Name,
-    type:        q.TypeDesc,
-    date:        q.SubmitDate?.slice(0, 10) ?? null,
-    personId:    q.PersonID ?? null,
-    mkName:      q.PersonID ? (nameMap[q.PersonID] ?? null) : null,
-    factionName: q.PersonID ? (factions[q.PersonID] ?? null) : null,
-    docUrl:      q.KNS_DocumentQuery?.find((d) => d.ApplicationDesc === 'PDF')?.FilePath ?? null,
-    endpoint,
-  }));
+  return queries
+    .filter((q) => {
+      if (!isFresh(q.SubmitDate)) {
+        console.log(`[SKIP] שאילתה ישנה — ${q.SubmitDate}`);
+        return false;
+      }
+      return true;
+    })
+    .map((q) => ({
+      id:          q.Id,
+      name:        q.Name,
+      type:        q.TypeDesc,
+      date:        q.SubmitDate?.slice(0, 10) ?? null,
+      personId:    q.PersonID ?? null,
+      mkName:      q.PersonID ? (nameMap[q.PersonID] ?? null) : null,
+      factionName: q.PersonID ? (factions[q.PersonID] ?? null) : null,
+      docUrl:      q.KNS_DocumentQuery?.find((d) => d.ApplicationDesc === 'PDF')?.FilePath ?? null,
+      endpoint,
+    }));
 }
 
 // ── Legacy shims (used by bot.js / scheduler.js) ──────────────────────────
