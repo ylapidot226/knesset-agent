@@ -1017,6 +1017,51 @@ async function getCommitteeMeetings() {
   return result.hasData ? result.sessions : [];
 }
 
+async function fetchWeeklyVoteAttendance() {
+  const { data: votes } = await odata('KNS_PlenumVote',
+    `$filter=${encodeURIComponent(`VoteDateTime gt ${isoAgo(7)}`)}&$orderby=Id desc&$top=100&$select=Id,VoteTitle,VoteDateTime`
+  );
+
+  if (votes.length < 3) {
+    console.log(`[knesset] רק ${votes.length} הצבעות השבוע — לא מספיק לדוח`);
+    return null;
+  }
+
+  const mkStats = {};
+
+  for (const vote of votes) {
+    const { rows } = await getVoteResults(vote.Id);
+    if (!rows) continue;
+    for (const r of rows) {
+      if (!r.MkId) continue;
+      if (!mkStats[r.MkId]) {
+        mkStats[r.MkId] = {
+          name: `${r.FirstName ?? ''} ${r.LastName ?? ''}`.trim(),
+          present: 0,
+        };
+      }
+      const desc = r.ResultDesc ?? '';
+      if (desc === 'בעד' || desc === 'נגד' || desc === 'נמנע' || desc === 'נוכח' || desc === 'קיזוז') {
+        mkStats[r.MkId].present++;
+      }
+    }
+  }
+
+  const totalVotes = votes.length;
+  const ranked = Object.entries(mkStats)
+    .filter(([, s]) => s.name)
+    .map(([id, s]) => ({ id, name: s.name, present: s.present, total: totalVotes }))
+    .sort((a, b) => b.present - a.present);
+
+  if (ranked.length < 5) return null;
+
+  return {
+    totalVotes,
+    topPresent:    ranked.slice(0, 5),
+    leastPresent:  ranked.slice(-5).reverse(),
+  };
+}
+
 async function getMemberRecentVotes(mkId) {
   if (!mkId) return [];
   const { data } = await odata(
@@ -1061,4 +1106,6 @@ module.exports = {
   fetchNewSinceCommitteeSessions,
   fetchNewSinceBills,
   fetchNewSinceQueries,
+  // Weekly report
+  fetchWeeklyVoteAttendance,
 };

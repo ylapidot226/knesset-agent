@@ -4,7 +4,8 @@ const knesset = require('./knesset');
 const ai = require('./ai');
 const { sendTweetPairForApproval, flushQueue, notify } = require('./bot');
 
-const CRON_EXPR = '*/30 8-23 * * *';
+const CRON_EXPR        = '*/30 8-23 * * *';
+const WEEKLY_CRON_EXPR = '0 18 * * 5';
 const TZ = 'Asia/Jerusalem';
 const MAX_PER_ENTITY = 3;
 
@@ -17,6 +18,7 @@ const FETCH_SPECS = [
 ];
 
 let cronTask = null;
+let weeklyCronTask = null;
 
 async function runCycle() {
   if (stateManager.isCronPaused()) {
@@ -113,26 +115,69 @@ async function runCycle() {
   }
 }
 
-function startScheduler() {
-  if (cronTask) {
-    cronTask.stop();
+async function runWeeklyReport() {
+  if (stateManager.isCronPaused()) return;
+
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: TZ });
+  const cache = stateManager.getWeeklyReportCache();
+  if (cache?.date === today) {
+    console.log('[scheduler] weekly report already ran today — skipping');
+    return;
   }
+
+  console.log('[scheduler] running weekly attendance report');
+
+  let data;
+  try {
+    data = await knesset.fetchWeeklyVoteAttendance();
+  } catch (err) {
+    console.error('[scheduler] weekly report fetch failed:', err.message);
+    await notify(`⚠️ שגיאה בדוח השבועי: ${err.message}`);
+    return;
+  }
+
+  if (!data) {
+    console.log('[scheduler] not enough votes for weekly report');
+    return;
+  }
+
+  stateManager.setWeeklyReportCache({ ...data, date: today });
+
+  const fmt = (list) =>
+    list.map((mk, i) => `${i + 1}. ${mk.name} — ${mk.present} מתוך ${mk.total}`).join('\n');
+
+  const tweet1 = `דוח שבועי — נוכחות בהצבעות\n\n🏆 הכי נוכחים השבוע:\n${fmt(data.topPresent)}\n\n@ערוץ_הכנסת #כנסת #נוכחות`;
+  const tweet2 = `🔻 הכי פחות נוכחים השבוע:\n${fmt(data.leastPresent)}\n\nנתונים רשמיים מאתר הכנסת`;
+
+  const pair = { tweet1, tweet2, sourceId: 'weekly', sourceType: 'weekly', date: today };
+  stateManager.enqueue(pair, { source: 'weekly-report' });
+  await flushQueue();
+  console.log('[scheduler] weekly report queued');
+}
+
+function startScheduler() {
+  if (cronTask) cronTask.stop();
+  if (weeklyCronTask) weeklyCronTask.stop();
 
   cronTask = cron.schedule(CRON_EXPR, runCycle, {
     timezone: TZ,
     scheduled: true,
   });
 
+  weeklyCronTask = cron.schedule(WEEKLY_CRON_EXPR, runWeeklyReport, {
+    timezone: TZ,
+    scheduled: true,
+  });
+
   console.log(`[scheduler] cron started (${CRON_EXPR} ${TZ})`);
+  console.log(`[scheduler] weekly cron started (${WEEKLY_CRON_EXPR} ${TZ})`);
   return cronTask;
 }
 
 function stopScheduler() {
-  if (cronTask) {
-    cronTask.stop();
-    cronTask = null;
-    console.log('[scheduler] stopped');
-  }
+  if (cronTask) { cronTask.stop(); cronTask = null; }
+  if (weeklyCronTask) { weeklyCronTask.stop(); weeklyCronTask = null; }
+  console.log('[scheduler] stopped');
 }
 
-module.exports = { startScheduler, stopScheduler, runCycle };
+module.exports = { startScheduler, stopScheduler, runCycle, runWeeklyReport };

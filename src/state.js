@@ -187,6 +187,19 @@ function hasPendingApprovals() {
   return Object.keys(state.pendingTweets || {}).length > 0;
 }
 
+// ── Weekly report cache ────────────────────────────────────────────────────
+
+function getWeeklyReportCache() {
+  const state = readState();
+  return state.weeklyReportCache ?? null;
+}
+
+function setWeeklyReportCache(data) {
+  const state = readState();
+  state.weeklyReportCache = { ...data, cachedAt: new Date().toISOString() };
+  writeState(state);
+}
+
 // ── Last-seen ID watermarks (per entity) ──────────────────────────────────
 
 function getLastSeenId(entity) {
@@ -230,4 +243,6 @@ module.exports = {
   dequeue,
   getQueueLength,
   hasPendingApprovals,
+  getWeeklyReportCache,
+  setWeeklyReportCache,
 };
