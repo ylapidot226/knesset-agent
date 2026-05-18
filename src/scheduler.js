@@ -33,6 +33,8 @@ async function runCycle() {
   stateManager.clearSentItemsIfNewDay();
   console.log('[scheduler] starting cycle at', new Date().toISOString());
 
+  let totalQueued = 0;
+
   for (const spec of FETCH_SPECS) {
     const sinceId = stateManager.getLastSeenId(spec.entity);
     console.log(`[scheduler] checking ${spec.entity} since id=${sinceId}`);
@@ -71,6 +73,7 @@ async function runCycle() {
 
     let sent = 0;
     for (const item of recentItems) {
+
       if (stateManager.hasItemBeenSent(item.id)) {
         stateManager.setLastSeenId(spec.entity, item.id);
         continue;
@@ -99,12 +102,13 @@ async function runCycle() {
       stateManager.markItemSent(item.id);
       stateManager.setLastSeenId(spec.entity, item.id);
       sent++;
+      totalQueued++;
       console.log(`[scheduler] queued pair for ${spec.entity} id=${item.id}`);
     }
   }
 
-  if (sent > 0) {
-    console.log(`[scheduler] ${sent} pairs queued — flushing first`);
+  if (totalQueued > 0) {
+    console.log(`[scheduler] ${totalQueued} pairs queued — flushing first`);
     await flushQueue();
   }
 }
