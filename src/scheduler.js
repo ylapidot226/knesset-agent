@@ -68,6 +68,9 @@ async function runCycle() {
 
     if (recentItems.length === 0) {
       console.log(`[scheduler] no recent items (today/yesterday) for ${spec.entity}`);
+      // Advance watermark past stale items so they aren't re-fetched next cycle
+      const maxId = Math.max(...items.map((i) => i.id));
+      if (maxId > 0) stateManager.setLastSeenId(spec.entity, maxId);
       continue;
     }
 
