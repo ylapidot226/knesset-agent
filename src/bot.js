@@ -27,6 +27,17 @@ function createBot() {
   bot.on('message', handleMessage);
   bot.on('polling_error', (err) => console.error('[bot] polling error:', err.message));
 
+  // Clear pending tweets from before this startup — old Telegram buttons can't be
+  // responded to after a restart, so they would permanently block the flush queue.
+  const stale = stateManager.readState().pendingTweets;
+  const staleCount = Object.keys(stale).length;
+  if (staleCount > 0) {
+    console.log(`[bot] clearing ${staleCount} stale pending tweet(s) from previous session`);
+    const state = stateManager.readState();
+    state.pendingTweets = {};
+    stateManager.writeState(state);
+  }
+
   console.log('[bot] started, polling for messages...');
   return bot;
 }
@@ -369,7 +380,10 @@ async function handleFreeCommand(chatId, text) {
 // ── Queue flush ────────────────────────────────────────────────────────────
 
 async function flushQueue() {
-  if (stateManager.hasPendingApprovals()) return;
+  if (stateManager.hasPendingApprovals()) {
+    console.log('[bot] flushQueue: blocked — waiting for pending approval');
+    return;
+  }
   const item = stateManager.dequeue();
   if (!item) return;
   const qLen = stateManager.getQueueLength();
